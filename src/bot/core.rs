@@ -619,12 +619,14 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
     }
 
     fn create_host(proxy: Option<&Socks5Config>) -> BotHost {
+        let use_new = std::env::var("GTPS_HOST").is_ok();
         let settings = enet::HostSettings {
             peer_limit: 1,
             channel_limit: 2,
             compressor: Some(Box::new(enet::RangeCoder::new())),
             checksum: Some(Box::new(enet::crc32)),
             using_new_packet: true,
+            using_new_packet_server: use_new,
             ..Default::default()
         };
         match proxy {
