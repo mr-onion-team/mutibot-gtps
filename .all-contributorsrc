@@ -1,0 +1,67 @@
+{
+  "projectName": "Mori",
+  "projectOwner": "CLOEI",
+  "files": [
+    "README.md"
+  ],
+  "commitType": "docs",
+  "commitConvention": "angular",
+  "contributorsPerLine": 7,
+  "contributors": [
+    {
+      "login": "CLOEI",
+      "name": "Cendy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/57063107?v=4",
+      "profile": "http://cendy.xyz",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "badewen",
+      "name": "badewen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/81739844?v=4",
+      "profile": "https://github.com/badewen",
+      "contributions": [
+        "research",
+        "bug"
+      ]
+    },
+    {
+      "login": "JadlionHD",
+      "name": "Hendra Gunawan",
+      "avatar_url": "https://avatars.githubusercontent.com/u/48410066?v=4",
+      "profile": "https://jad.li",
+      "contributions": [
+        "design"
+      ]
+    },
+    {
+      "login": "ToyFarms",
+      "name": "shafarrahman",
+      "avatar_url": "https://avatars.githubusercontent.com/u/121172018?v=4",
+      "profile": "https://github.com/ToyFarms",
+      "contributions": [
+        "bug"
+      ]
+    },
+    {
+      "login": "zephrynis",
+      "name": "Zephrynis",
+      "avatar_url": "https://avatars.githubusercontent.com/u/132010650?v=4",
+      "profile": "http://zephrynis.me",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "dipaadipati",
+      "name": "Muhammad Adipati Rezkya",
+      "avatar_url": "https://avatars.githubusercontent.com/u/43718266?v=4",
+      "profile": "https://portofolio-adipati-nuxt.vercel.app/",
+      "contributions": [
+        "code"
+      ]
+    }
+  ]
+}
