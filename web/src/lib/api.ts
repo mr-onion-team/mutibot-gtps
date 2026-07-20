@@ -174,7 +174,8 @@ export type BotCmd =
   | { type: "reconnect" }
   | { type: "set_collect_config"; radius_tiles: number; blacklist: number[] }
   | { type: "accept_access" }
-  | { type: "warp"; name: string; id: string };
+  | { type: "warp"; name: string; id: string }
+  | { type: "say"; text: string };
 
 export interface ProxyTestRequest {
   proxy_host: string;

@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-use crate::bot::{Socks5Config};
+use crate::bot::{GtpsConfig, Socks5Config, SharedGtpsConfig};
 use crate::bot_state::{BotCommand, BotState, BotStatus, CmdSender};
 use crate::events::{WsEvent, WsTx};
 use crate::items::ItemsDat;
@@ -20,6 +20,7 @@ pub struct BotManager {
     pub bots:  HashMap<u32, BotEntry>,
     pub items_dat: Arc<ItemsDat>,
     pub ws_tx: WsTx,
+    pub gtps: SharedGtpsConfig,
 }
 
 #[derive(serde::Serialize)]
@@ -36,7 +37,7 @@ pub struct BotInfo {
 
 impl BotManager {
     pub fn new(ws_tx: WsTx) -> Self {
-        Self { next_id: 0, bots: HashMap::new(), items_dat: Arc::new(ItemsDat::load()), ws_tx }
+        Self { next_id: 0, bots: HashMap::new(), items_dat: Arc::new(ItemsDat::load()), ws_tx, gtps: Arc::new(RwLock::new(None)) }
     }
 
     pub fn spawn(&mut self, username: String, password: String, proxy: Option<Socks5Config>) -> u32 {
@@ -58,10 +59,11 @@ impl BotManager {
 
         let items_dat = self.items_dat.clone();
         let ws_tx_clone = self.ws_tx.clone();
+        let gtps = self.gtps.read().unwrap().clone();
 
         std::thread::spawn(move || {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut bot = crate::bot::Bot::new(&uname, &pass, proxy, state_clone, cmd_rx, items_dat, id, Some(ws_tx_clone));
+                let mut bot = crate::bot::Bot::new(&uname, &pass, proxy, gtps, state_clone, cmd_rx, items_dat, id, Some(ws_tx_clone));
                 bot.run(stop_clone);
             })) {
                 Ok(_)  => println!("[Bot:{id}] Stopped."),
@@ -91,10 +93,11 @@ impl BotManager {
 
         let items_dat = self.items_dat.clone();
         let ws_tx_clone = self.ws_tx.clone();
+        let gtps = self.gtps.read().unwrap().clone();
 
         std::thread::spawn(move || {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut bot = crate::bot::Bot::new_ltoken(&ltoken_str, proxy, state_clone, cmd_rx, items_dat, id, Some(ws_tx_clone));
+                let mut bot = crate::bot::Bot::new_ltoken(&ltoken_str, proxy, gtps, state_clone, cmd_rx, items_dat, id, Some(ws_tx_clone));
                 bot.run(stop_clone);
             })) {
                 Ok(_)  => println!("[Bot:{id}] Stopped."),

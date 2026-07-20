@@ -214,6 +214,7 @@ pub enum BotCommand {
     },
     SetAutoReconnect { enabled: bool },
     AcceptAccess,
+    SetAutoWarp { world: String },
 }
 
 pub type CmdSender   = mpsc::Sender<BotCommand>;

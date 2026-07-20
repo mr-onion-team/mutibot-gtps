@@ -17,6 +17,7 @@ use std::net::{ToSocketAddrs, SocketAddr};
 
 use crate::auth::AuthState;
 use crate::bot::Socks5Config;
+use crate::bot::GtpsConfig;
 use crate::bot_manager::{BotInfo, BotManager};
 use crate::bot_state::{BotCommand, BotDelays, BotState};
 use crate::events::WsTx;
@@ -147,6 +148,7 @@ struct SpawnRequest {
     proxy_port:     Option<u16>,
     proxy_username: Option<String>,
     proxy_password: Option<String>,
+    auto_warp:      Option<String>,
 }
 
 async fn spawn_bot(
@@ -249,6 +251,8 @@ enum CmdRequest {
     Reconnect,
     AcceptAccess,
     Warp { name: String, id: String },
+    SetAutoWarp { world: String },
+    Say { text: String },
 }
 
 #[derive(Deserialize)]
@@ -358,6 +362,8 @@ async fn bot_cmd(
         CmdRequest::Reconnect => BotCommand::Reconnect,
         CmdRequest::AcceptAccess => BotCommand::AcceptAccess,
         CmdRequest::Warp { name, id } => BotCommand::Warp { name, id },
+        CmdRequest::SetAutoWarp { world } => BotCommand::SetAutoWarp { world },
+        CmdRequest::Say { text } => BotCommand::Say { text },
     };
     if s.manager.lock().unwrap().send_cmd(id, cmd) {
         StatusCode::NO_CONTENT
@@ -400,6 +406,65 @@ async fn proxy_check(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(result))
+}
+
+// ── GTPS config ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct GtpsConfigRequest {
+    host: String,
+    #[serde(default = "default_gtps_port")]
+    port: u16,
+    #[serde(default)]
+    server_type: u8,
+    #[serde(default)]
+    type2: u8,
+    #[serde(default)]
+    meta: String,
+}
+
+fn default_gtps_port() -> u16 {
+    17091
+}
+
+async fn get_gtps_config(
+    State(s): State<AppState>,
+) -> Json<serde_json::Value> {
+    let gtps = s.manager.lock().unwrap().gtps.read().unwrap().clone();
+    match gtps {
+        Some(cfg) => Json(serde_json::json!({
+            "host": cfg.host,
+            "port": cfg.port,
+            "server_type": cfg.server_type,
+            "type2": cfg.type2,
+            "meta": cfg.meta,
+        })),
+        None => Json(serde_json::json!({ "host": "", "port": 17091 })),
+    }
+}
+
+async fn set_gtps_config(
+    State(s): State<AppState>,
+    Json(req): Json<GtpsConfigRequest>,
+) -> StatusCode {
+    let cfg = GtpsConfig {
+        host: req.host,
+        port: req.port,
+        server_type: req.server_type,
+        type2: req.type2,
+        meta: req.meta,
+    };
+    let mut mgr = s.manager.lock().unwrap();
+    *mgr.gtps.write().unwrap() = Some(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn clear_gtps_config(
+    State(s): State<AppState>,
+) -> StatusCode {
+    let mut mgr = s.manager.lock().unwrap();
+    *mgr.gtps.write().unwrap() = None;
+    StatusCode::NO_CONTENT
 }
 
 // ── WebSocket handler ─────────────────────────────────────────────────────────
@@ -503,6 +568,7 @@ pub async fn serve(manager: SharedManager, ws_tx: WsTx) {
         .route("/items/names", get(item_names))
         .route("/items/colors", get(item_colors))
         .route("/proxy/test", post(proxy_check))
+        .route("/gtps", get(get_gtps_config).post(set_gtps_config).delete(clear_gtps_config))
         .route("/growtopia-cdn/{*path}", get(growtopia_cdn))
         .route("/ws", get(ws_handler))
 

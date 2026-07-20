@@ -1,7 +1,7 @@
 use crate::protocol::packet::GameUpdatePacket;
 use crate::protocol::variant::VariantList;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 use super::core::Bot;
 
@@ -28,6 +28,18 @@ pub enum BotEventRaw {
     GameUpdate { pkt: GameUpdatePacket },
     GameMessage { text: String },
 }
+
+/// Shared GTPS server configuration.
+#[derive(Clone, Debug, Default)]
+pub struct GtpsConfig {
+    pub host: String,
+    pub port: u16,
+    pub server_type: u8,
+    pub type2: u8,
+    pub meta: String,
+}
+
+pub type SharedGtpsConfig = Arc<RwLock<Option<GtpsConfig>>>;
 
 /// Callback invoked on the next `OnDialogRequest`, then cleared.
 type DialogCallback = Box<dyn FnOnce(&mut Bot) + Send>;

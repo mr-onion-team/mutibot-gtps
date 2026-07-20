@@ -1,4 +1,4 @@
-pub const MAP_VERSION_MIN: u16 = 0x19;
+pub const MAP_VERSION_MIN: u16 = 0x14;
 pub const MAX_TILE_COUNT: u32 = 65_026;
 pub const MAX_WORLD_OBJECTS: u32 = 0x493E1;
 

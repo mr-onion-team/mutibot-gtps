@@ -18,12 +18,12 @@ use crate::protocol::variant::VariantList;
 use crate::world::{NpcAction, NpcType, TileFlags, TileType, World, WorldNpc, WorldObject, WorldTilePermission};
 use rusty_enet as enet;
 use std::collections::{HashMap, HashSet};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use super::auth::fetch_credentials;
-use super::shared::{BotEventRaw, Socks5Config, TemporaryData};
+use super::shared::{BotEventRaw, GtpsConfig, Socks5Config, TemporaryData};
 
 enum BotHost {
     Direct(enet::Host<UdpSocket>),
@@ -219,6 +219,10 @@ pub struct Bot {
     ws_tx: Option<WsTx>,
     /// Last broadcast ping value — used to suppress redundant BotPing events.
     last_ping: u32,
+    /// Shared GTPS server configuration.
+    pub gtps: Option<GtpsConfig>,
+    /// Auto-warp to this world after login/dismiss dialog.
+    pub auto_warp: Option<String>,
 }
 
 fn sorted_blacklist_vec(set: &HashSet<u16>) -> Vec<u16> {
@@ -232,6 +236,7 @@ impl Bot {
         username: &str,
         password: &str,
         proxy: Option<Socks5Config>,
+        gtps: Option<GtpsConfig>,
         state: Arc<RwLock<BotState>>,
         cmd_rx: CmdReceiver,
         items_dat: Arc<ItemsDat>,
@@ -257,7 +262,7 @@ impl Bot {
                 });
             }
         };
-        let creds = fetch_credentials(username, password, proxy.as_ref(), &mut log_fn);
+        let creds = fetch_credentials(username, password, proxy.as_ref(), gtps.as_ref(), &mut log_fn);
 
         let mac = random_mac();
         let hash = hash_string(&format!("{}RT", mac));
@@ -325,6 +330,8 @@ impl Bot {
             bot_id,
             ws_tx,
             last_ping: 0,
+            gtps,
+            auto_warp: None,
         };
 
         {
@@ -354,6 +361,7 @@ impl Bot {
     pub fn new_ltoken(
         ltoken_str: &str,
         proxy: Option<Socks5Config>,
+        gtps: Option<GtpsConfig>,
         state: Arc<RwLock<BotState>>,
         cmd_rx: CmdReceiver,
         items_dat: Arc<ItemsDat>,
@@ -398,7 +406,7 @@ impl Bot {
             log_fn(format!(
                 "[Bot] fetching server_data (alternate={alternate})..."
             ));
-            match get_server_data_proxied(alternate, &login_info, proxy_url_ref) {
+            match get_server_data_proxied(alternate, &login_info, proxy_url_ref, gtps.as_ref()) {
                 Ok(s) => break s,
                 Err(e) => {
                     alternate = !alternate;
@@ -420,7 +428,9 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
         );
 
         // GTPS mode: skip token validation
-        let ltoken = if std::env::var("GTPS_HOST").is_ok() {
+        let is_gtps = gtps.as_ref().map_or(false, |c| !c.host.is_empty())
+            || std::env::var("GTPS_HOST").is_ok();
+        let ltoken = if is_gtps {
             log_fn("[Bot] GTPS mode: skipping token validation".to_string());
             ltoken
         } else {
@@ -434,8 +444,13 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
         };
 
         let addr: SocketAddr = format!("{}:{}", server_data.server, server_data.port)
-            .parse()
-            .expect("Invalid server address");
+            .to_socket_addrs()
+            .expect("Failed to resolve server address")
+            .filter(|a| a.is_ipv4())
+            .next()
+            .or_else(|| format!("{}:{}", server_data.server, server_data.port)
+                .to_socket_addrs().ok()?.next())
+            .expect("No addresses found for server");
 
         let host = Self::create_host(proxy.as_ref());
         let mut bot = Bot {
@@ -495,6 +510,8 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
             bot_id,
             ws_tx,
             last_ping: 0,
+            gtps,
+            auto_warp: None,
         };
 
         {
@@ -516,12 +533,12 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
             game_version: GAME_VER.into(),
         };
         let proxy_url = self.proxy.as_ref().map(|p| p.to_url());
-        let mut alternate = false;
+
+        // Re-fetch server data (fast for GTPS, same config) then reconnect
         let server_data = loop {
-            match get_server_data_proxied(alternate, &login_info, proxy_url.as_deref()) {
+            match get_server_data_proxied(false, &login_info, proxy_url.as_deref(), self.gtps.as_ref()) {
                 Ok(s) => break s,
                 Err(e) => {
-                    alternate = !alternate;
                     self.log_console(format!(
                         "[Bot] reconnect: server_data failed: {e} — retrying in 5s"
                     ));
@@ -532,8 +549,14 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
         self.meta = server_data.meta.clone();
 
         let addr: SocketAddr = format!("{}:{}", server_data.server, server_data.port)
-            .parse()
-            .expect("Invalid server address");
+            .to_socket_addrs()
+            .expect("Failed to resolve server address")
+            .filter(|a| a.is_ipv4())
+            .next()
+            .or_else(|| format!("{}:{}", server_data.server, server_data.port)
+                .to_socket_addrs().ok()?.next())
+            .expect("No addresses found for server");
+        self.log_console(format!("[Bot] Reconnecting to {}:{}", server_data.server, server_data.port));
         self.host.connect(addr, 2, 0);
     }
 
@@ -591,6 +614,32 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
     }
 
     fn build_login_packet(&self) -> String {
+        // GTPS mode: send username/password directly
+        if let Some(cfg) = &self.gtps {
+            if !cfg.host.is_empty() {
+                let klv = compute_klv(GAME_VER, &PROTOCOL.to_string(), &self.rid, self.hash);
+                return format!(
+                    "tankIDName|{user}\ntankIDPass|{pass}\nrequestedName|\nf|1\n\
+                    protocol|{PROTOCOL}\ngame_version|{GAME_VER}\nfz|47142936\ncbits|1536\n\
+                    player_age|18\nGDPR|1\nFCMToken|\ncategory|_-5100\ntotalPlaytime|0\n\
+                    klv|{klv}\nhash2|{hash2}\nmeta|{meta}\nfhash|{FHASH}\nrid|{rid}\n\
+                    platformID|0,1,1\ndeviceVersion|0\ncountry|ma\nhash|{hash}\nmac|{mac}\n\
+                    wk|{wk}\nzf|-821693372\nlmode|1\n",
+                    user = self.username,
+                    pass = self.ltoken, // ltoken holds password in GTPS mode
+                    klv = klv,
+                    PROTOCOL = PROTOCOL,
+                    GAME_VER = GAME_VER,
+                    hash2 = self.hash2,
+                    meta = self.meta,
+                    FHASH = FHASH,
+                    rid = self.rid,
+                    hash = self.hash,
+                    mac = self.mac,
+                    wk = self.wk,
+                );
+            }
+        }
         format!(
             "protocol|{PROTOCOL}\nltoken|{}\nplatformID|2\n",
             self.ltoken
@@ -651,6 +700,14 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
 
     /// Refreshes `self.ltoken`: tries check_token first, then falls back based on login method.
     fn refresh_token(&mut self) {
+        // GTPS mode: skip token refresh entirely — just re-login with credentials
+        let is_gtps = self.gtps.as_ref().map_or(false, |c| !c.host.is_empty())
+            || std::env::var("GTPS_HOST").is_ok();
+        if is_gtps {
+            self.log_console("[Bot] GTPS mode: skipping token refresh".to_string());
+            return;
+        }
+
         let login_data = self.build_login_data();
         let proxy = self.proxy.as_ref().map(|p| p.to_url());
         let proxy_url = proxy.as_deref();
@@ -696,7 +753,7 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
                     }
                 };
                 let creds =
-                    fetch_credentials(&username, &password, proxy_clone.as_ref(), &mut log_fn);
+                    fetch_credentials(&username, &password, proxy_clone.as_ref(), self.gtps.as_ref(), &mut log_fn);
                 self.ltoken = creds.ltoken;
                 self.meta = creds.meta;
             }
@@ -719,7 +776,7 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
                     self.reconnect_after = None;
                     if self.auto_reconnect {
                         self.log_console(
-                            "[Bot] 2FA cooldown elapsed — re-fetching token and server data"
+                            "[Bot] Reconnect timer elapsed — reconnecting"
                                 .to_string(),
                         );
                         self.reconnect_main();
@@ -811,10 +868,13 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
                             );
                         } else {
                             self.log_console(
-                                "[Bot] Server disconnected — re-fetching token and server data"
+                                "[Bot] Server disconnected — reconnecting in 3s"
                                     .to_string(),
                             );
-                            self.reconnect_main();
+                            self.reconnect_after = Some(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_secs(3),
+                            );
                         }
                     } else {
                         self.log_console(
@@ -1087,6 +1147,14 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
                                                 bot_id: self.bot_id,
                                                 objects: ws_objs,
                                             });
+                                            let w = world.tile_map.width;
+                                            let h = world.tile_map.height;
+                                            if let Some(idx) = world.tile_map.tiles.iter().position(|t| t.fg_item_id == 6) {
+                                                let door_x = idx as u32 % w;
+                                                let door_y = idx as u32 / w;
+                                                self.log_console(format!("[Bot] Main door at ({door_x},{door_y}) — walking there"));
+                                                self.walk(door_x, door_y);
+                                            }
                                         }
                                         Err(e) => self
                                             .log_console(format!("[Bot] World parse error: {e}")),
@@ -1517,6 +1585,29 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
             "OnDialogRequest" => {
                 let message = vl.get(1).map(|v| v.as_string()).unwrap_or_default();
                 self.log_console(format!("[Bot] Dialog: {}", message));
+
+                // Auto-dismiss known post-login dialogs (gazette, etc.)
+                if message.contains("end_dialog|gazzette_end") {
+                    self.send_text("action|dialog_return\ndialog_name|gazzette_end\nbutton_name|Ok\n");
+                    self.log_console("[Bot] Auto-dismissed gazette dialog".to_string());
+                    // If auto_warp is set, warp after dismissing
+                    if let Some(world) = self.auto_warp.clone() {
+                        let name = world.clone();
+                        self.warp(&name, "");
+                        self.log_console(format!("[Bot] Auto-warping to {name}"));
+                    }
+                } else if message.contains("end_dialog|") {
+                    // Auto-dismiss any other end_dialog with Ok
+                    if let Some(name) = message.lines()
+                        .find(|l| l.starts_with("end_dialog|"))
+                        .and_then(|l| l.split('|').nth(1))
+                    {
+                        let dname = name.to_string();
+                        self.send_text(&format!("action|dialog_return\ndialog_name|{dname}\nbutton_name|Ok\n"));
+                        self.log_console(format!("[Bot] Auto-dismissed dialog: {dname}"));
+                    }
+                }
+
                 let cb = self.temporary_data.dialog_callback.lock().unwrap().take();
                 if let Some(cb) = cb {
                     cb(self);
@@ -1528,8 +1619,30 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
                     self.state.write().unwrap().username = growid.clone();
                     self.emit(WsEvent::BotUsername {
                         bot_id: self.bot_id,
-                        username: growid,
+                        username: growid.clone(),
                     });
+                    if self.gtps.as_ref().map_or(false, |c| !c.host.is_empty()) {
+                        let grow_id_num = growid.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                        let track = crate::bot_state::TrackInfo {
+                            level: 1,
+                            grow_id: grow_id_num,
+                            install_date: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            global_playtime: self.start_time.elapsed().as_secs(),
+                            awesomeness: 0,
+                        };
+                        self.state.write().unwrap().track_info = Some(track.clone());
+                        self.emit(WsEvent::BotTrackInfo {
+                            bot_id: self.bot_id,
+                            level: track.level,
+                            grow_id: track.grow_id,
+                            install_date: track.install_date,
+                            global_playtime: track.global_playtime,
+                            awesomeness: track.awesomeness,
+                        });
+                    }
                 }
             }
 
@@ -2772,6 +2885,15 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
                 st.collect_blacklist = sorted_blacklist_vec(&self.collect_blacklist);
             }
             BotCommand::AcceptAccess => self.accept_access(),
+            BotCommand::SetAutoWarp { world } => {
+                if world.is_empty() {
+                    self.auto_warp = None;
+                    self.log_console("[Bot] Auto-warp disabled".to_string());
+                } else {
+                    self.auto_warp = Some(world.clone());
+                    self.log_console(format!("[Bot] Auto-warp set to: {world}"));
+                }
+            }
         }
     }
 

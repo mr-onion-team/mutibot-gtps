@@ -1,6 +1,8 @@
 use std::time::Duration;
 use ureq::tls::TlsConfig;
 
+use crate::bot::GtpsConfig;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub struct LoginInfo {
@@ -77,16 +79,49 @@ impl ServerData {
     }
 }
 
-pub fn get_server_data(alternate: bool, login_info: &LoginInfo) -> Result<ServerData> {
-    get_server_data_proxied(alternate, login_info, None)
+pub fn get_server_data(
+    alternate: bool,
+    login_info: &LoginInfo,
+    gtps: Option<&GtpsConfig>,
+) -> Result<ServerData> {
+    get_server_data_proxied(alternate, login_info, None, gtps)
 }
 
 pub fn get_server_data_proxied(
     alternate: bool,
     login_info: &LoginInfo,
     proxy_url: Option<&str>,
+    gtps: Option<&GtpsConfig>,
 ) -> Result<ServerData> {
-    // Check for custom GTPS server via environment variables
+    // Check for custom GTPS server via shared config or environment variables
+    if let Some(cfg) = gtps {
+        if !cfg.host.is_empty() {
+            println!("[server_data] Using custom GTPS server: {}:{}", cfg.host, cfg.port);
+            return Ok(ServerData {
+                server: cfg.host.clone(),
+                port: cfg.port,
+                loginurl: String::new(),
+                server_type: cfg.server_type,
+                beta_server: String::new(),
+                beta_loginurl: String::new(),
+                beta_port: 0,
+                beta_type: 0,
+                beta2_server: String::new(),
+                beta2_loginurl: String::new(),
+                beta2_port: 0,
+                beta2_type: 0,
+                beta3_server: String::new(),
+                beta3_loginurl: String::new(),
+                beta3_port: 0,
+                beta3_type: 0,
+                type2: cfg.type2,
+                maint: None,
+                meta: cfg.meta.clone(),
+            });
+        }
+    }
+
+    // Fallback: check environment variables
     if let Ok(host) = std::env::var("GTPS_HOST") {
         let port: u16 = std::env::var("GTPS_PORT")
             .unwrap_or_else(|_| "17091".to_string())
@@ -103,7 +138,7 @@ pub fn get_server_data_proxied(
         let meta = std::env::var("GTPS_META")
             .unwrap_or_else(|_| "localhost".to_string());
         
-        println!("[server_data] Using custom GTPS server: {}:{}", host, port);
+        println!("[server_data] Using custom GTPS server (env): {}:{}", host, port);
         return Ok(ServerData {
             server: host,
             port,

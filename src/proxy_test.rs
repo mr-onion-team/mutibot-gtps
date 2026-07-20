@@ -53,8 +53,8 @@ pub fn run_proxy_test(cfg: Socks5Config) -> ProxyTestResult {
     };
 
     let (server_data_check, server_addr) = {
-        let result = get_server_data_proxied(false, &login_info, Some(&proxy_url))
-            .or_else(|_| get_server_data_proxied(true, &login_info, Some(&proxy_url)));
+        let result = get_server_data_proxied(false, &login_info, Some(&proxy_url), None)
+            .or_else(|_| get_server_data_proxied(true, &login_info, Some(&proxy_url), None));
         match result {
             Ok(sd) => {
                 let detail = format!("{}:{}", sd.server, sd.port);

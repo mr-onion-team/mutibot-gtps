@@ -127,20 +127,24 @@ export function BotDetail({ bot }: { bot: LiveBot }) {
             {bot.ping_ms}ms
           </span>
         )}
-        <button
-          title="Reconnect"
+        <Button
+          size="sm"
+          variant="default"
+          className="h-6 text-[10px] px-2 gap-1"
           onClick={() => api.sendCmd(bot.id, { type: "reconnect" })}
-          className="w-5 h-5 flex items-center justify-center rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
         >
           <PlugZap className="w-3 h-3" />
-        </button>
-        <button
-          title="Disconnect"
+          Connect
+        </Button>
+        <Button
+          size="sm"
+          variant="destructive"
+          className="h-6 text-[10px] px-2 gap-1"
           onClick={() => api.sendCmd(bot.id, { type: "disconnect" })}
-          className="w-5 h-5 flex items-center justify-center rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
         >
           <Unplug className="w-3 h-3" />
-        </button>
+          Disconnect
+        </Button>
         <button
           onClick={() => setSelectedId(null)}
           className="ml-1 w-5 h-5 flex items-center justify-center rounded hover:bg-muted text-muted-foreground hover:text-foreground text-xs transition-colors"
@@ -176,7 +180,7 @@ export function BotDetail({ bot }: { bot: LiveBot }) {
           value="console"
           className="flex-1 overflow-hidden m-0 p-4 flex flex-col"
         >
-          <ConsoleTab lines={bot.console} />
+          <ConsoleTab botId={bot.id} lines={bot.console} />
         </TabsContent>
 
         <TabsContent
@@ -269,7 +273,7 @@ function OverviewTab({ bot }: { bot: LiveBot }) {
           <div className="rounded border border-border bg-background p-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
             {[
               ["Level", bot.track_info?.level],
-              ["Grow ID", bot.track_info?.grow_id],
+              ["Grow ID", bot.username || bot.track_info?.grow_id],
               ["Awesomeness", bot.track_info?.awesomeness],
               [
                 "Playtime",
@@ -521,28 +525,57 @@ function AutoCollectRangePanel({
 
 // ── Console tab ─────────────────────────────────────────────────────────────
 
-function ConsoleTab({ lines }: { lines: string[] }) {
+function ConsoleTab({ botId, lines }: { botId: number; lines: string[] }) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [input, setInput] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [lines]);
 
+  function send() {
+    const text = input.trim();
+    if (!text) return;
+    api.sendCmd(botId, { type: "say", text });
+    setInput("");
+  }
+
   return (
-    <ScrollArea className="flex-1 min-h-0 rounded border border-border bg-background p-3 font-mono text-[12px] leading-relaxed">
-      {lines.length === 0 ? (
-        <span className="text-muted-foreground">No output yet.</span>
-      ) : (
-        lines.map((line, i) => (
-          <div
-            key={i}
-            className="whitespace-pre-wrap break-all"
-            dangerouslySetInnerHTML={{ __html: parseGTColors(line) }}
-          />
-        ))
-      )}
-      <div ref={bottomRef} />
-    </ScrollArea>
+    <div className="flex-1 min-h-0 flex flex-col gap-2">
+      <ScrollArea className="flex-1 min-h-0 rounded border border-border bg-background p-3 font-mono text-[12px] leading-relaxed">
+        {lines.length === 0 ? (
+          <span className="text-muted-foreground">No output yet.</span>
+        ) : (
+          lines.map((line, i) => (
+            <div
+              key={i}
+              className="whitespace-pre-wrap break-all"
+              dangerouslySetInnerHTML={{ __html: parseGTColors(line) }}
+            />
+          ))
+        )}
+        <div ref={bottomRef} />
+      </ScrollArea>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send();
+        }}
+      >
+        <input
+          ref={inputRef}
+          className="flex-1 rounded border border-border bg-background px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+          placeholder="Type a message..."
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+        />
+        <Button type="submit" size="sm">
+          Send
+        </Button>
+      </form>
+    </div>
   );
 }
 
