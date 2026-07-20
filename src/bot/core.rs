@@ -24,10 +24,12 @@ use std::sync::{Arc, RwLock};
 
 use super::auth::fetch_credentials;
 use super::shared::{BotEventRaw, Socks5Config, TemporaryData};
+use super::ws::{WsBotHost, WsPacketEvent};
 
 enum BotHost {
     Direct(enet::Host<UdpSocket>),
     Socks5(enet::Host<Socks5UdpSocket>),
+    WebSocket(WsBotHost),
 }
 
 impl BotHost {
@@ -47,6 +49,35 @@ impl BotHost {
                     None
                 }
             }
+            Self::WebSocket(_) => None,
+        }
+    }
+
+    fn next_ws_event(&mut self) -> WsPacketEvent {
+        match self {
+            Self::WebSocket(ws) => ws.next_event(),
+            _ => WsPacketEvent::None,
+        }
+    }
+
+    fn ws_connect(&mut self) -> bool {
+        match self {
+            Self::WebSocket(ws) => ws.connect_now(),
+            _ => false,
+        }
+    }
+
+    fn ws_send_raw(&mut self, data: &[u8]) -> bool {
+        match self {
+            Self::WebSocket(ws) => ws.send_raw(data),
+            _ => false,
+        }
+    }
+
+    fn ws_send_text_raw(&mut self, data: &[u8]) -> bool {
+        match self {
+            Self::WebSocket(ws) => ws.send_text_raw(data),
+            _ => false,
         }
     }
 
@@ -58,6 +89,7 @@ impl BotHost {
             Self::Socks5(h) => {
                 h.connect(addr, channels, data).expect("connect failed");
             }
+            Self::WebSocket(_) => {}
         }
     }
 
@@ -65,6 +97,7 @@ impl BotHost {
         match self {
             Self::Direct(h) => h.peer_mut(id).round_trip_time(),
             Self::Socks5(h) => h.peer_mut(id).round_trip_time(),
+            Self::WebSocket(ws) => ws.rtt(),
         }
     }
 
@@ -75,6 +108,9 @@ impl BotHost {
             }
             Self::Socks5(h) => {
                 h.peer_mut(id).send(channel, packet).ok();
+            }
+            Self::WebSocket(ws) => {
+                ws.send_raw(packet.data());
             }
         }
     }
@@ -87,6 +123,20 @@ impl BotHost {
             Self::Socks5(h) => {
                 h.peer_mut(id).disconnect(data);
             }
+            Self::WebSocket(ws) => {
+                ws.disconnect();
+            }
+        }
+    }
+
+    fn is_ws(&self) -> bool {
+        matches!(self, Self::WebSocket(_))
+    }
+
+    fn ws_is_connected(&self) -> bool {
+        match self {
+            Self::WebSocket(ws) => ws.is_connected(),
+            _ => false,
         }
     }
 }
@@ -118,6 +168,8 @@ pub struct Bot {
     login_method: LoginMethod,
     /// Legacy token from HTTP login (used in first ServerHello only).
     ltoken: String,
+    /// Password stored for GTPS legacy login fallback.
+    password: String,
     /// `meta` from server_data.php — echoed in all login packets.
     meta: String,
     /// Per-session random values computed once at startup.
@@ -265,7 +317,17 @@ impl Bot {
         let wk = random_hex(32);
         let rid = generate_rid();
 
-        let host = Self::create_host(proxy.as_ref());
+        let host = if std::env::var("GTPS_WS").is_ok() {
+            let ws_host = std::env::var("GTPS_HOST").unwrap_or_default();
+            let ws_port = std::env::var("GTPS_PORT").unwrap_or_else(|_| "443".to_string());
+            let addr: SocketAddr = format!("{}:{}", ws_host, ws_port)
+                .parse()
+                .expect("Invalid WS address");
+            let host_header = ws_host.clone();
+            BotHost::WebSocket(WsBotHost::new(addr, host_header))
+        } else {
+            Self::create_host(proxy.as_ref())
+        };
         let mut bot = Bot {
             host,
             proxy,
@@ -274,6 +336,7 @@ impl Bot {
                 password: password.to_string(),
             },
             ltoken: creds.ltoken,
+            password: password.to_string(),
             meta: creds.meta,
             mac,
             hash,
@@ -444,6 +507,7 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
             username: String::new(),
             login_method: LoginMethod::Ltoken,
             ltoken,
+            password: String::new(),
             meta: server_data.meta,
             mac,
             hash,
@@ -503,13 +567,29 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
             s.collect_radius_tiles = bot.collect_radius_tiles;
             s.collect_blacklist = sorted_blacklist_vec(&bot.collect_blacklist);
         }
-        bot.host.connect(addr, 2, 0);
+        let connect_data: u32 = if std::env::var("GTPS_HOST").is_ok() { 1 } else { 0 };
+        bot.host.connect(addr, 2, connect_data);
         bot
     }
 
     fn reconnect_main(&mut self) {
-        self.host = Self::create_host(self.proxy.as_ref());
-        self.refresh_token();
+        if std::env::var("GTPS_WS").is_ok() {
+            let ws_host = std::env::var("GTPS_HOST").unwrap_or_default();
+            let ws_port = std::env::var("GTPS_PORT").unwrap_or_else(|_| "443".to_string());
+            let addr: SocketAddr = format!("{}:{}", ws_host, ws_port)
+                .parse()
+                .expect("Invalid WS address");
+            let host_header = ws_host.clone();
+            self.host = BotHost::WebSocket(WsBotHost::new(addr, host_header));
+        } else {
+            self.host = Self::create_host(self.proxy.as_ref());
+        }
+
+        if std::env::var("GTPS_HOST").is_ok() {
+            self.log_console("[Bot] GTPS reconnect — skipping token refresh".to_string());
+        } else {
+            self.refresh_token();
+        }
 
         let login_info = LoginInfo {
             protocol: PROTOCOL,
@@ -534,16 +614,19 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
         let addr: SocketAddr = format!("{}:{}", server_data.server, server_data.port)
             .parse()
             .expect("Invalid server address");
-        self.host.connect(addr, 2, 0);
+        let connect_data: u32 = if std::env::var("GTPS_HOST").is_ok() { 1 } else { 0 };
+        self.host.connect(addr, 2, connect_data);
     }
 
     fn create_host(proxy: Option<&Socks5Config>) -> BotHost {
+        let use_new = std::env::var("GTPS_HOST").is_ok();
         let settings = enet::HostSettings {
             peer_limit: 1,
             channel_limit: 2,
             compressor: Some(Box::new(enet::RangeCoder::new())),
             checksum: Some(Box::new(enet::crc32)),
             using_new_packet: true,
+            using_new_packet_server: use_new,
             ..Default::default()
         };
         match proxy {
@@ -591,6 +674,25 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
     }
 
     fn build_login_packet(&self) -> String {
+        // GTPS mode: send full legacy login with username + password
+        if std::env::var("GTPS_HOST").is_ok() {
+            let klv = compute_klv(GAME_VER, &PROTOCOL.to_string(), &self.rid, self.hash);
+            return format!(
+                "tankIDName|{user}\ntankIDPass|{pass}\nrequestedName|\nf|1\nprotocol|{PROTOCOL}\n\
+game_version|{GAME_VER}\nfz|22243512\ncbits|1024\nplayer_age|20\nGDPR|2\nFCMToken|\n\
+category|_-5100\ntotalPlaytime|0\nklv|{klv}\nhash2|{hash2}\nmeta|{meta}\nfhash|{FHASH}\n\
+rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}\nwk|{wk}\nzf|31631978\nlmode|1\n",
+                user = self.username,
+                pass = self.password,
+                klv = klv,
+                hash2 = self.hash2,
+                meta = self.meta,
+                rid = self.rid,
+                hash = self.hash,
+                mac = self.mac,
+                wk = self.wk,
+            );
+        }
         format!(
             "protocol|{PROTOCOL}\nltoken|{}\nplatformID|2\n",
             self.ltoken
@@ -761,8 +863,12 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
         }
     }
 
-    /// Process all pending ENet events once.
+    /// Process all pending ENet or WebSocket events once.
     pub fn service_once(&mut self) {
+        if self.host.is_ws() {
+            self.service_once_ws();
+            return;
+        }
         while let Some(event) = self.host.next_event() {
             match event {
                 enet::EventNoRef::Connect { peer: id, .. } => {
@@ -1183,6 +1289,170 @@ rid|{}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{}\nmac|{}\nwk|{}\nz
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn service_once_ws(&mut self) {
+        // If we haven't connected the WS yet, try now
+        if !self.host.ws_is_connected() {
+            if self.host.ws_connect() {
+                self.log_console("[Bot] WS connected — setting up peer".to_string());
+                self.peer_id = Some(enet::PeerID(0));
+                self.emit(WsEvent::BotStatus {
+                    bot_id: self.bot_id,
+                    status: "connecting".into(),
+                });
+            } else {
+                return;
+            }
+        }
+
+        // Process pending WS events
+        loop {
+            match self.host.next_ws_event() {
+                super::ws::WsPacketEvent::Connect => {
+                    self.log_console("[Bot] WS Connect event".to_string());
+                }
+                super::ws::WsPacketEvent::Disconnect => {
+                    self.peer_id = None;
+                    self.log_console("[Bot] WS Disconnected".to_string());
+                    {
+                        let mut s = self.state.write().unwrap();
+                        s.status = BotStatus::Connecting;
+                        s.world_name = String::new();
+                        s.players = Vec::new();
+                        s.ping_ms = 0;
+                    }
+                    self.emit(WsEvent::BotStatus {
+                        bot_id: self.bot_id,
+                        status: "connecting".into(),
+                    });
+                    self.emit(WsEvent::BotWorld {
+                        bot_id: self.bot_id,
+                        world_name: String::new(),
+                    });
+                    return;
+                }
+                super::ws::WsPacketEvent::Receive(data) => {
+                    self.handle_ws_packet(&data);
+                }
+                super::ws::WsPacketEvent::None => break,
+            }
+        }
+    }
+
+    fn handle_ws_packet(&mut self, data: &[u8]) {
+        use crate::protocol::packet::{MSG_SERVER_HELLO, MSG_TEXT, MSG_GAME_MESSAGE, MSG_GAME_PACKET, MSG_TRACK, MSG_CLIENT_LOG_REQUEST};
+
+        if data.len() < 4 {
+            return;
+        }
+        let msg_type = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        let payload = &data[4..];
+
+        match msg_type {
+            MSG_SERVER_HELLO => {
+                self.on_server_hello();
+            }
+            MSG_TEXT | MSG_GAME_MESSAGE => {
+                let s = std::str::from_utf8(
+                    payload.split(|&b| b == 0 || b >= 0x80).next().unwrap_or(payload)
+                ).unwrap_or("");
+                self.log_console(format!("[Bot] WS Text: {s}"));
+                if msg_type == MSG_GAME_MESSAGE {
+                    if let Some(tx) = &self.event_tx {
+                        tx.try_send(BotEventRaw::GameMessage { text: s.to_string() }).ok();
+                    }
+                    if s.contains("action|log") && s.contains("Advanced Account Protection") {
+                        self.pending_2fa = true;
+                    }
+                    if s.contains("action|log") && s.contains("SERVER OVERLOADED") {
+                        self.pending_server_overload = true;
+                    }
+                    if s.contains("action|log") && s.contains("Too many people logging in") {
+                        self.pending_too_many_logins = true;
+                    }
+                    if s.contains("action|log") && s.contains("UPDATE REQUIRED") {
+                        self.pending_update_required = true;
+                    }
+                    if s.contains("action|log") && s.contains("undergoing maintenance") {
+                        self.pending_maintenance = true;
+                    }
+                }
+            }
+            MSG_GAME_PACKET => {
+                if let Some(pkt) = GameUpdatePacket::from_bytes(payload) {
+                    if let Some(tx) = &self.event_tx {
+                        tx.try_send(BotEventRaw::GameUpdate { pkt: pkt.clone() }).ok();
+                    }
+                    match pkt.packet_type {
+                        GamePacketType::PingRequest => {
+                            self.on_ping_request(pkt.value);
+                        }
+                        GamePacketType::CallFunction => {
+                            let extra = pkt.extra_data.clone();
+                            self.on_call_function(enet::PeerID(0), &extra);
+                        }
+                        GamePacketType::SendMapData => {
+                            let _ = std::fs::write("world.dat", &pkt.extra_data);
+                            self.players.clear();
+                            self.local = LocalPlayer::default();
+                            match World::parse(&pkt.extra_data) {
+                                Ok(world) => {
+                                    self.log_console(format!(
+                                        "[Bot] World: {}x{} tiles",
+                                        world.tile_map.width, world.tile_map.height,
+                                    ));
+                                    let world = Arc::new(world);
+                                    self.world = Some(Arc::clone(&world));
+                                    let mut s = self.state.write().unwrap();
+                                    s.world_name = world.tile_map.world_name.clone();
+                                    s.world_width = world.tile_map.width;
+                                    s.world_height = world.tile_map.height;
+                                    s.players = Vec::new();
+                                    s.status = BotStatus::InGame;
+                                    drop(s);
+                                    self.emit(WsEvent::BotStatus {
+                                        bot_id: self.bot_id,
+                                        status: "in_game".into(),
+                                    });
+                                    self.emit(WsEvent::BotWorld {
+                                        bot_id: self.bot_id,
+                                        world_name: world.tile_map.world_name.clone(),
+                                    });
+                                }
+                                Err(e) => self.log_console(format!("[Bot] World parse error: {e}")),
+                            }
+                        }
+                        GamePacketType::State => self.on_state(&pkt),
+                        GamePacketType::SendInventoryState => {
+                            match Inventory::parse(&pkt.extra_data) {
+                                Ok(inv) => {
+                                    self.log_console(format!(
+                                        "[Bot] Inventory: {} items", inv.item_count
+                                    ));
+                                    self.inventory = inv.clone();
+                                    self.emit_inventory_update();
+                                }
+                                Err(e) => self.log_console(format!("[Bot] Inventory parse error: {e}")),
+                            }
+                        }
+                        _ => self.log_console(format!("[Bot] {pkt}")),
+                    }
+                }
+            }
+            MSG_TRACK => {
+                let s = std::str::from_utf8(
+                    payload.split(|&b| b == 0 || b >= 0x80).next().unwrap_or(payload)
+                ).unwrap_or("");
+                self.log_console(format!("[Bot] WS Track: {s}"));
+            }
+            MSG_CLIENT_LOG_REQUEST => {
+                self.log_console("[Bot] WS ClientLogRequest".to_string());
+            }
+            other => {
+                self.log_console(format!("[Bot] WS Unknown type={other} len={}", payload.len()));
             }
         }
     }
