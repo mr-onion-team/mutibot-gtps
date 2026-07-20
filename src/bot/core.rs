@@ -118,6 +118,8 @@ pub struct Bot {
     login_method: LoginMethod,
     /// Legacy token from HTTP login (used in first ServerHello only).
     ltoken: String,
+    /// Password stored for GTPS legacy login fallback.
+    password: String,
     /// `meta` from server_data.php — echoed in all login packets.
     meta: String,
     /// Per-session random values computed once at startup.
@@ -274,6 +276,7 @@ impl Bot {
                 password: password.to_string(),
             },
             ltoken: creds.ltoken,
+            password: password.to_string(),
             meta: creds.meta,
             mac,
             hash,
@@ -444,6 +447,7 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
             username: String::new(),
             login_method: LoginMethod::Ltoken,
             ltoken,
+            password: String::new(),
             meta: server_data.meta,
             mac,
             hash,
@@ -503,13 +507,19 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
             s.collect_radius_tiles = bot.collect_radius_tiles;
             s.collect_blacklist = sorted_blacklist_vec(&bot.collect_blacklist);
         }
-        bot.host.connect(addr, 2, 0);
+        let connect_data: u32 = if std::env::var("GTPS_HOST").is_ok() { 1 } else { 0 };
+        bot.host.connect(addr, 2, connect_data);
         bot
     }
 
     fn reconnect_main(&mut self) {
         self.host = Self::create_host(self.proxy.as_ref());
-        self.refresh_token();
+
+        if std::env::var("GTPS_HOST").is_ok() {
+            self.log_console("[Bot] GTPS reconnect — skipping token refresh".to_string());
+        } else {
+            self.refresh_token();
+        }
 
         let login_info = LoginInfo {
             protocol: PROTOCOL,
@@ -534,7 +544,8 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
         let addr: SocketAddr = format!("{}:{}", server_data.server, server_data.port)
             .parse()
             .expect("Invalid server address");
-        self.host.connect(addr, 2, 0);
+        let connect_data: u32 = if std::env::var("GTPS_HOST").is_ok() { 1 } else { 0 };
+        self.host.connect(addr, 2, connect_data);
     }
 
     fn create_host(proxy: Option<&Socks5Config>) -> BotHost {
@@ -591,6 +602,25 @@ rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}
     }
 
     fn build_login_packet(&self) -> String {
+        // GTPS mode: send full legacy login with username + password
+        if std::env::var("GTPS_HOST").is_ok() {
+            let klv = compute_klv(GAME_VER, &PROTOCOL.to_string(), &self.rid, self.hash);
+            return format!(
+                "tankIDName|{user}\ntankIDPass|{pass}\nrequestedName|\nf|1\nprotocol|{PROTOCOL}\n\
+game_version|{GAME_VER}\nfz|22243512\ncbits|1024\nplayer_age|20\nGDPR|2\nFCMToken|\n\
+category|_-5100\ntotalPlaytime|0\nklv|{klv}\nhash2|{hash2}\nmeta|{meta}\nfhash|{FHASH}\n\
+rid|{rid}\nplatformID|0,1,1\ndeviceVersion|0\ncountry|jp\nhash|{hash}\nmac|{mac}\nwk|{wk}\nzf|31631978\nlmode|1\n",
+                user = self.username,
+                pass = self.password,
+                klv = klv,
+                hash2 = self.hash2,
+                meta = self.meta,
+                rid = self.rid,
+                hash = self.hash,
+                mac = self.mac,
+                wk = self.wk,
+            );
+        }
         format!(
             "protocol|{PROTOCOL}\nltoken|{}\nplatformID|2\n",
             self.ltoken
