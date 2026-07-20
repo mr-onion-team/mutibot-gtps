@@ -1068,6 +1068,15 @@ fn run_script_inner(
             Ok(out)
         })?)?;
 
+        // ── console(msg) ──────────────────────────────────────────────────────
+        {
+            let state2 = state.clone();
+            lua.globals().set("console", lua.create_function(move |_, msg: String| {
+                state2.write().unwrap().console.push(msg);
+                Ok(())
+            })?)?;
+        }
+
         // ── clearConsole() ────────────────────────────────────────────────────
         {
             let state2 = state.clone();
